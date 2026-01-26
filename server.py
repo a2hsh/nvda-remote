@@ -320,8 +320,10 @@ async def main():
     try:
         ssl_ctx.load_cert_chain(certfile=args.certfile, keyfile=args.keyfile)
     except FileNotFoundError:
-        logger.error(f"Certificates not found. Did you forget to generate them or set NVDA_REMOTE_CERT_CONTENT?")
-        sys.exit(1)
+        logger.warning(f"Certificates not found. Generating self-signed certificate.")
+        generate_certificate()
+        ssl_ctx.load_cert_chain(certfile=args.certfile, keyfile=args.keyfile)
+    ssl_ctx.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1  # Disable old protocols
 
     server_instance = AsyncServer(args)
     
