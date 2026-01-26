@@ -15,4 +15,4 @@ COPY server.py .
 
 EXPOSE 6837
 
-CMD ["python", "server_async.py"]
+CMD ["python", "server.py"]
