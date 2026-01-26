@@ -4,7 +4,7 @@ import ssl
 import sys
 import logging
 import argparse
-import secrets  # CHANGED: Stronger randomness
+import secrets
 import string
 import os
 import traceback
@@ -22,7 +22,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("NVDARemote")
 
-# --- 1. Linux Resource Limit Fix ---
 if sys.platform != 'win32':
     try:
         import resource
@@ -44,22 +43,28 @@ class AsyncServer:
         self.client_id_counter = itertools.count(1)
 
     def generate_unique_key(self):
-        # FEATURE: Generate Cryptographically Strong Keys
-        # 8 characters, mixed case letters + digits
         alphabet = string.ascii_letters + string.digits
         for _ in range(100):
             key = "".join(secrets.choice(alphabet) for _ in range(8))
             if key not in self.channels:
                 return key
-        # Fallback to longer if collision hell happens
         return "".join(secrets.choice(alphabet) for _ in range(12))
+
+    def is_key_weak(self, key):
+        if len(key) < self.args.min_key_length:
+            return True, f"Key too short. Minimum length is {self.args.min_key_length}."
+        if len(set(key)) == 1:
+            return True, "Key too simple. Do not use repeated characters."
+        sequences = ["123456", "234567", "345678", "456789", "abcdef", "bcdefg", "qwerty", "asdfgh"]
+        lower_key = key.lower()
+        for seq in sequences:
+            if seq in lower_key:
+                return True, "Key too simple. Do not use common sequences."
+        return False, ""
 
     async def handle_client(self, reader, writer):
         addr = writer.get_extra_info('peername')
-        ssl_obj = writer.get_extra_info('ssl_object')
-        cipher_info = f" ({ssl_obj.version()} / {ssl_obj.cipher()[0]})" if ssl_obj else ""
-        
-        logger.info(f"Accepted connection from {addr}{cipher_info}")
+        logger.info(f"Accepted connection from {addr}")
 
         sock = writer.get_extra_info('socket')
         if sock:
@@ -70,20 +75,14 @@ class AsyncServer:
 
         client = Client(reader, writer, self)
         self.clients.add(client)
-        
-        logger.info(f"Total Clients Connected: {len(self.clients)}")
-        
         client.start_tasks()
 
         try:
             while True:
                 try:
-                    line = await asyncio.wait_for(
-                        reader.readline(), 
-                        timeout=self.args.timeout
-                    )
+                    line = await asyncio.wait_for(reader.readline(), timeout=self.args.timeout)
                 except asyncio.TimeoutError:
-                    logger.info(f"Client {client.id} from {addr} timed out (idle).")
+                    logger.info(f"Client {client.id} from {addr} timed out.")
                     break
 
                 if not line: 
@@ -97,7 +96,7 @@ class AsyncServer:
                 await client.process_message(line)
 
         except ConnectionResetError:
-            logger.info(f"Client {client.id} connection reset by peer.")
+            pass
         except Exception as e:
             if self.args.tracebacks:
                 logger.error(f"Error client {client.id}:\n{traceback.format_exc()}")
@@ -106,8 +105,6 @@ class AsyncServer:
         finally:
             await client.cleanup()
             self.clients.discard(client)
-            logger.info(f"Client {client.id} disconnected. Total Clients: {len(self.clients)}")
-            
             try:
                 writer.close()
                 await writer.wait_closed()
@@ -125,6 +122,8 @@ class Client:
         self.out_queue = asyncio.Queue(maxsize=200) 
         self.writer_task = None
         self.ping_task = None
+        # FIX 1: Initialize connection_type to prevent crashes
+        self.connection_type = "unknown" 
 
     def start_tasks(self):
         self.writer_task = asyncio.create_task(self.write_loop())
@@ -144,7 +143,6 @@ class Client:
         try:
             self.out_queue.put_nowait(data)
         except asyncio.QueueFull:
-            logger.warning(f"Client {self.id} send queue full. Disconnecting.")
             self.writer.close()
 
     async def keep_alive_loop(self):
@@ -185,20 +183,23 @@ class Client:
 
     async def do_join(self, data):
         new_channel = data.get('channel')
+        # FIX 2: Capture connection_type from the client's join request
+        self.connection_type = data.get('connection_type', 'unknown')
+        
         if not new_channel:
             await self.send_error("invalid_parameters")
             return
 
-        # FEATURE: Enforce Minimum Key Length
-        if len(new_channel) < self.server.args.min_key_length:
-            logger.warning(f"Client {self.id} tried to join with weak key '{new_channel}'. Rejected.")
-            await self.send_error(f"Key too short. Minimum length is {self.server.args.min_key_length} characters.")
-            return
+        if self.server.args.min_key_length > 0:
+            is_weak, reason = self.server.is_key_weak(new_channel)
+            if is_weak:
+                logger.warning(f"Client {self.id} rejected. Weak Key.")
+                await self.send_error(reason)
+                return
 
         if self.channel_id and self.channel_id in self.server.channels:
              self.server.channels[self.channel_id].discard(self)
              if not self.server.channels[self.channel_id]:
-                 logger.info(f"Channel '{self.channel_id}' destroyed (empty).")
                  del self.server.channels[self.channel_id]
 
         self.channel_id = new_channel
@@ -209,11 +210,12 @@ class Client:
 
         peers = [c for c in self.server.channels[self.channel_id] if c != self]
         
+        # FIX 3: Send connection_type back to the client
         response = {
             "type": "channel_joined",
             "channel": new_channel,
             "user_ids": [c.id for c in peers],
-            "clients": [{"id": c.id} for c in peers]
+            "clients": [{"id": c.id, "connection_type": c.connection_type} for c in peers]
         }
         await self.send_json(response)
         
@@ -224,7 +226,11 @@ class Client:
                 "force_display": self.server.args.motd_force
             })
 
-        await self.broadcast({"type": "client_joined", "client": {"id": self.id}}, include_self=False)
+        # FIX 4: Broadcast connection_type to other clients so they know who joined
+        await self.broadcast({
+            "type": "client_joined", 
+            "client": {"id": self.id, "connection_type": self.connection_type}
+        }, include_self=False)
 
     async def broadcast(self, data, include_self=False):
         if not self.channel_id or self.channel_id not in self.server.channels:
@@ -267,7 +273,6 @@ class Client:
                 del self.server.channels[self.channel_id]
 
 def generate_certificate():
-    """Generates a self-signed certificate using OpenSSL."""
     logger.info("Generating new self-signed certificate (server.pem)...")
     cmd = [
         "openssl", "req", "-new", "-newkey", "rsa:4096", "-days", "3650",
@@ -284,9 +289,7 @@ def generate_certificate():
         sys.exit(1)
 
 async def main():
-    parser = argparse.ArgumentParser(description="NVDA Remote Async Server")
-    
-    # Configuration
+    parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=int(os.environ.get("NVDA_REMOTE_PORT", 6837)))
     parser.add_argument("--certfile", default=os.environ.get("NVDA_REMOTE_CERTFILE", "server.pem"))
     parser.add_argument("--keyfile", default=os.environ.get("NVDA_REMOTE_KEYFILE", "server.pem"))
@@ -297,11 +300,8 @@ async def main():
     parser.add_argument("--ping-interval", type=int, default=int(os.environ.get("NVDA_REMOTE_PING_INTERVAL", 60)))
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("NVDA_REMOTE_TIMEOUT", 300)))
     parser.add_argument("--max-msg-size", type=int, default=int(os.environ.get("NVDA_REMOTE_MAX_MSG_SIZE", 1048576)))
-    
-    # NEW: Security Config
     parser.add_argument("--min-key-length", type=int, default=int(os.environ.get("NVDA_REMOTE_MIN_KEY_LENGTH", 0)))
-    
-    parser.add_argument("--generate-cert", action="store_true", help="Generate a self-signed certificate and exit")
+    parser.add_argument("--generate-cert", action="store_true")
 
     args = parser.parse_args()
     logger.setLevel(logging.DEBUG if args.debug else logging.INFO)
@@ -312,29 +312,23 @@ async def main():
 
     cert_content = os.environ.get("NVDA_REMOTE_CERT_CONTENT")
     if cert_content:
-        logger.info("Found certificate content in environment variables. Writing to file.")
         try:
             with open("server.pem", "wb") as f:
                 f.write(base64.b64decode(cert_content))
-        except Exception as e:
-            logger.error(f"Failed to decode certificate from environment: {e}")
+        except Exception:
             sys.exit(1)
 
     ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     try:
         ssl_ctx.load_cert_chain(certfile=args.certfile, keyfile=args.keyfile)
     except FileNotFoundError:
-        logger.warning(f"Certificates not found. Generating self-signed certificate.")
         generate_certificate()
         ssl_ctx.load_cert_chain(certfile=args.certfile, keyfile=args.keyfile)
     ssl_ctx.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 
 
     server_instance = AsyncServer(args)
-    
-    server = await asyncio.start_server(
-        server_instance.handle_client, '0.0.0.0', args.port, ssl=ssl_ctx
-    )
-    logger.info(f"Serving on 0.0.0.0:{args.port} (IPv4 Only)")
+    server = await asyncio.start_server(server_instance.handle_client, '0.0.0.0', args.port, ssl=ssl_ctx)
+    logger.info(f"Serving on 0.0.0.0:{args.port}")
     
     async with server:
         await server.serve_forever()
