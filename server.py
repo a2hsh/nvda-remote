@@ -309,18 +309,11 @@ async def main():
 
     server_instance = AsyncServer(args)
     
-    # Dual Stack Binding
-    try:
-        server = await asyncio.start_server(
-            server_instance.handle_client, '::', args.port, ssl=ssl_ctx
-        )
-        logger.info(f"Serving on [::]:{args.port} (Dual Stack)")
-    except OSError:
-        server = await asyncio.start_server(
-            server_instance.handle_client, '0.0.0.0', args.port, ssl=ssl_ctx
-        )
-        logger.info(f"Serving on 0.0.0.0:{args.port} (IPv4 Only)")
-
+    # Force IPv4 for maximum compatibility
+    server = await asyncio.start_server(
+        server_instance.handle_client, '0.0.0.0', args.port, ssl=ssl_ctx
+    )
+    logger.info(f"Serving on 0.0.0.0:{args.port} (IPv4)")
     async with server:
         await server.serve_forever()
 
