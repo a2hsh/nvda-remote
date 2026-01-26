@@ -43,24 +43,14 @@ class AsyncServer:
         self.client_id_counter = itertools.count(1)
 
     def generate_unique_key(self):
+        # FEATURE: We keep the STRONG key generation for users who want it.
+        # 8 characters, mixed case letters + digits.
         alphabet = string.ascii_letters + string.digits
         for _ in range(100):
             key = "".join(secrets.choice(alphabet) for _ in range(8))
             if key not in self.channels:
                 return key
         return "".join(secrets.choice(alphabet) for _ in range(12))
-
-    def is_key_weak(self, key):
-        if len(key) < self.args.min_key_length:
-            return True, f"Key too short. Minimum length is {self.args.min_key_length}."
-        if len(set(key)) == 1:
-            return True, "Key too simple. Do not use repeated characters."
-        sequences = ["123456", "234567", "345678", "456789", "abcdef", "bcdefg", "qwerty", "asdfgh"]
-        lower_key = key.lower()
-        for seq in sequences:
-            if seq in lower_key:
-                return True, "Key too simple. Do not use common sequences."
-        return False, ""
 
     async def handle_client(self, reader, writer):
         addr = writer.get_extra_info('peername')
@@ -132,11 +122,9 @@ class Client:
         try:
             while True:
                 data = await self.out_queue.get()
-                # FIX: Check for "None" which is our signal to kill the connection cleanly
-                if data is None:
+                if data is None: # Signal to close
                     self.writer.close()
                     break
-                
                 self.writer.write(data)
                 await self.writer.drain()
                 self.out_queue.task_done()
@@ -148,9 +136,8 @@ class Client:
             self.out_queue.put_nowait(data)
         except asyncio.QueueFull:
             self.writer.close()
-    
+
     async def disconnect(self):
-        """Cleanly sends all pending messages then closes connection."""
         await self.out_queue.put(None)
 
     async def keep_alive_loop(self):
@@ -186,29 +173,22 @@ class Client:
             await self.send_error("not_joined")
 
     async def do_generate_key(self):
+        # Generate a STRONG key, send it, and close the connection (standard protocol behavior)
         new_key = self.server.generate_unique_key()
         await self.send_json({"type": "generate_key", "key": new_key})
-        # FIX: Disconnect after generating key (Matches original server behavior)
         await self.disconnect()
 
     async def do_join(self, data):
         new_channel = data.get('channel')
+        # Crucial: Capture connection_type to prevent client crashes
         self.connection_type = data.get('connection_type', 'unknown')
         
         if not new_channel:
             await self.send_error("invalid_parameters")
             return
 
-        # Security Check
-        if self.server.args.min_key_length > 0:
-            is_weak, reason = self.server.is_key_weak(new_channel)
-            if is_weak:
-                logger.warning(f"Client {self.id} rejected. Weak Key: {new_channel}")
-                await self.send_error(reason)
-                # FIX: Force disconnect so client doesn't hang in zombie state
-                await self.disconnect()
-                return
-
+        # NO LIMITS: We accept every key. If they want to use "1", let them.
+        
         if self.channel_id and self.channel_id in self.server.channels:
              self.server.channels[self.channel_id].discard(self)
              if not self.server.channels[self.channel_id]:
@@ -222,6 +202,7 @@ class Client:
 
         peers = [c for c in self.server.channels[self.channel_id] if c != self]
         
+        # Echo connection_type back to client (Prevent KeyError)
         response = {
             "type": "channel_joined",
             "channel": new_channel,
@@ -237,6 +218,7 @@ class Client:
                 "force_display": self.server.args.motd_force
             })
 
+        # Broadcast connection_type to others (Prevent KeyError on their side)
         await self.broadcast({
             "type": "client_joined", 
             "client": {"id": self.id, "connection_type": self.connection_type}
@@ -310,7 +292,6 @@ async def main():
     parser.add_argument("--ping-interval", type=int, default=int(os.environ.get("NVDA_REMOTE_PING_INTERVAL", 60)))
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("NVDA_REMOTE_TIMEOUT", 300)))
     parser.add_argument("--max-msg-size", type=int, default=int(os.environ.get("NVDA_REMOTE_MAX_MSG_SIZE", 1048576)))
-    parser.add_argument("--min-key-length", type=int, default=int(os.environ.get("NVDA_REMOTE_MIN_KEY_LENGTH", 0)))
     parser.add_argument("--generate-cert", action="store_true")
 
     args = parser.parse_args()
