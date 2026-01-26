@@ -51,6 +51,13 @@ class AsyncServer:
         return "".join(random.choices(string.digits, k=8))
 
     async def handle_client(self, reader, writer):
+        # --- LOGGING FEATURE 1: Connection & SSL Info ---
+        addr = writer.get_extra_info('peername')
+        ssl_obj = writer.get_extra_info('ssl_object')
+        cipher_info = f" ({ssl_obj.version()} / {ssl_obj.cipher()[0]})" if ssl_obj else ""
+        
+        logger.info(f"Accepted connection from {addr}{cipher_info}")
+
         # Optimization: Disable Nagle's algorithm
         sock = writer.get_extra_info('socket')
         if sock:
@@ -61,6 +68,10 @@ class AsyncServer:
 
         client = Client(reader, writer, self)
         self.clients.add(client)
+        
+        # --- LOGGING FEATURE 2: Global Client Count ---
+        logger.info(f"Total Clients Connected: {len(self.clients)}")
+        
         client.start_tasks()
 
         try:
@@ -71,10 +82,12 @@ class AsyncServer:
                         timeout=self.args.timeout
                     )
                 except asyncio.TimeoutError:
-                    logger.debug(f"Client {client.id} timed out.")
+                    logger.info(f"Client {client.id} from {addr} timed out (idle).")
                     break
 
-                if not line: break 
+                if not line: 
+                    logger.info(f"Client {client.id} from {addr} closed connection.")
+                    break 
                 
                 if self.args.max_msg_size > 0 and len(line) > self.args.max_msg_size:
                     logger.warning(f"Client {client.id} exceeded max message size.")
@@ -83,7 +96,7 @@ class AsyncServer:
                 await client.process_message(line)
 
         except ConnectionResetError:
-            pass 
+            logger.info(f"Client {client.id} connection reset by peer.")
         except Exception as e:
             if self.args.tracebacks:
                 logger.error(f"Error client {client.id}:\n{traceback.format_exc()}")
@@ -92,6 +105,9 @@ class AsyncServer:
         finally:
             await client.cleanup()
             self.clients.discard(client)
+            # Log disconnect count
+            logger.info(f"Client {client.id} disconnected. Total Clients: {len(self.clients)}")
+            
             try:
                 writer.close()
                 await writer.wait_closed()
@@ -145,6 +161,9 @@ class Client:
         except json.JSONDecodeError:
             return
 
+        # Debug logs show raw JSON (Only if NVDA_REMOTE_DEBUG=True)
+        logger.debug(f"RECV {self.id}: {line.strip()}")
+
         msg_type = data.get('type')
         if not msg_type: return
 
@@ -174,10 +193,14 @@ class Client:
         if self.channel_id and self.channel_id in self.server.channels:
              self.server.channels[self.channel_id].discard(self)
              if not self.server.channels[self.channel_id]:
+                 # --- LOGGING FEATURE 3: Channel Lifecycle ---
+                 logger.info(f"Channel '{self.channel_id}' destroyed (empty).")
                  del self.server.channels[self.channel_id]
 
         self.channel_id = new_channel
         if self.channel_id not in self.server.channels:
+            # --- LOGGING FEATURE 3: Channel Lifecycle ---
+            logger.info(f"Channel '{self.channel_id}' created by Client {self.id}")
             self.server.channels[self.channel_id] = set()
         self.server.channels[self.channel_id].add(self)
 
@@ -237,6 +260,8 @@ class Client:
             self.server.channels[self.channel_id].discard(self)
             await self.broadcast({"type": "client_left", "user_id": self.id}, include_self=False)
             if not self.server.channels[self.channel_id]:
+                # --- LOGGING FEATURE 3: Channel Lifecycle ---
+                logger.info(f"Channel '{self.channel_id}' destroyed (empty).")
                 del self.server.channels[self.channel_id]
 
 def generate_certificate():
@@ -249,16 +274,10 @@ def generate_certificate():
         "-keyout", "server.pem", "-out", "server.pem"
     ]
     try:
-        # Check if openssl exists
         subprocess.run(["openssl", "version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # Generate
         subprocess.run(cmd, check=True)
-        # Combine is handled by writing key and cert to same file in the command above
         logger.info("Certificate generated successfully.")
-    except FileNotFoundError:
-        logger.error("Error: 'openssl' command not found. Please install openssl.")
-        sys.exit(1)
-    except subprocess.CalledProcessError as e:
+    except Exception as e:
         logger.error(f"Error generating certificate: {e}")
         sys.exit(1)
 
@@ -283,12 +302,10 @@ async def main():
     args = parser.parse_args()
     logger.setLevel(logging.DEBUG if args.debug else logging.INFO)
 
-    # 1. Handle Certificate Generation
     if args.generate_cert:
         generate_certificate()
         sys.exit(0)
 
-    # 2. Handle Certificate Injection from Env (The GitIgnore Fix)
     cert_content = os.environ.get("NVDA_REMOTE_CERT_CONTENT")
     if cert_content:
         logger.info("Found certificate content in environment variables. Writing to file.")
@@ -303,17 +320,17 @@ async def main():
     try:
         ssl_ctx.load_cert_chain(certfile=args.certfile, keyfile=args.keyfile)
     except FileNotFoundError:
-        logger.error(f"Certificates not found: {args.certfile}. Did you forget to generate them or set NVDA_REMOTE_CERT_CONTENT?")
-        logger.info("Tip: Run 'python server_async.py --generate-cert' to create one locally.")
+        logger.error(f"Certificates not found. Did you forget to generate them or set NVDA_REMOTE_CERT_CONTENT?")
         sys.exit(1)
 
     server_instance = AsyncServer(args)
     
-    # Force IPv4 for maximum compatibility
+    # Force IPv4 binding (Fixes the Dual Stack issue)
     server = await asyncio.start_server(
         server_instance.handle_client, '0.0.0.0', args.port, ssl=ssl_ctx
     )
-    logger.info(f"Serving on 0.0.0.0:{args.port} (IPv4)")
+    logger.info(f"Serving on 0.0.0.0:{args.port} (IPv4 Only)")
+    
     async with server:
         await server.serve_forever()
 
