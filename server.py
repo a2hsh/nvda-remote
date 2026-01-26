@@ -4,7 +4,7 @@ import ssl
 import sys
 import logging
 import argparse
-import random
+import secrets  # CHANGED: Stronger randomness
 import string
 import os
 import traceback
@@ -44,21 +44,23 @@ class AsyncServer:
         self.client_id_counter = itertools.count(1)
 
     def generate_unique_key(self):
+        # FEATURE: Generate Cryptographically Strong Keys
+        # 8 characters, mixed case letters + digits
+        alphabet = string.ascii_letters + string.digits
         for _ in range(100):
-            key = "".join(random.choices(string.digits, k=6))
+            key = "".join(secrets.choice(alphabet) for _ in range(8))
             if key not in self.channels:
                 return key
-        return "".join(random.choices(string.digits, k=8))
+        # Fallback to longer if collision hell happens
+        return "".join(secrets.choice(alphabet) for _ in range(12))
 
     async def handle_client(self, reader, writer):
-        # --- LOGGING FEATURE 1: Connection & SSL Info ---
         addr = writer.get_extra_info('peername')
         ssl_obj = writer.get_extra_info('ssl_object')
         cipher_info = f" ({ssl_obj.version()} / {ssl_obj.cipher()[0]})" if ssl_obj else ""
         
         logger.info(f"Accepted connection from {addr}{cipher_info}")
 
-        # Optimization: Disable Nagle's algorithm
         sock = writer.get_extra_info('socket')
         if sock:
             try:
@@ -69,7 +71,6 @@ class AsyncServer:
         client = Client(reader, writer, self)
         self.clients.add(client)
         
-        # --- LOGGING FEATURE 2: Global Client Count ---
         logger.info(f"Total Clients Connected: {len(self.clients)}")
         
         client.start_tasks()
@@ -105,7 +106,6 @@ class AsyncServer:
         finally:
             await client.cleanup()
             self.clients.discard(client)
-            # Log disconnect count
             logger.info(f"Client {client.id} disconnected. Total Clients: {len(self.clients)}")
             
             try:
@@ -161,7 +161,6 @@ class Client:
         except json.JSONDecodeError:
             return
 
-        # Debug logs show raw JSON (Only if NVDA_REMOTE_DEBUG=True)
         logger.debug(f"RECV {self.id}: {line.strip()}")
 
         msg_type = data.get('type')
@@ -190,16 +189,20 @@ class Client:
             await self.send_error("invalid_parameters")
             return
 
+        # FEATURE: Enforce Minimum Key Length
+        if len(new_channel) < self.server.args.min_key_length:
+            logger.warning(f"Client {self.id} tried to join with weak key '{new_channel}'. Rejected.")
+            await self.send_error(f"Key too short. Minimum length is {self.server.args.min_key_length} characters.")
+            return
+
         if self.channel_id and self.channel_id in self.server.channels:
              self.server.channels[self.channel_id].discard(self)
              if not self.server.channels[self.channel_id]:
-                 # --- LOGGING FEATURE 3: Channel Lifecycle ---
                  logger.info(f"Channel '{self.channel_id}' destroyed (empty).")
                  del self.server.channels[self.channel_id]
 
         self.channel_id = new_channel
         if self.channel_id not in self.server.channels:
-            # --- LOGGING FEATURE 3: Channel Lifecycle ---
             logger.info(f"Channel '{self.channel_id}' created by Client {self.id}")
             self.server.channels[self.channel_id] = set()
         self.server.channels[self.channel_id].add(self)
@@ -260,7 +263,6 @@ class Client:
             self.server.channels[self.channel_id].discard(self)
             await self.broadcast({"type": "client_left", "user_id": self.id}, include_self=False)
             if not self.server.channels[self.channel_id]:
-                # --- LOGGING FEATURE 3: Channel Lifecycle ---
                 logger.info(f"Channel '{self.channel_id}' destroyed (empty).")
                 del self.server.channels[self.channel_id]
 
@@ -296,7 +298,9 @@ async def main():
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("NVDA_REMOTE_TIMEOUT", 300)))
     parser.add_argument("--max-msg-size", type=int, default=int(os.environ.get("NVDA_REMOTE_MAX_MSG_SIZE", 1048576)))
     
-    # Helper commands
+    # NEW: Security Config
+    parser.add_argument("--min-key-length", type=int, default=int(os.environ.get("NVDA_REMOTE_MIN_KEY_LENGTH", 0)))
+    
     parser.add_argument("--generate-cert", action="store_true", help="Generate a self-signed certificate and exit")
 
     args = parser.parse_args()
@@ -323,11 +327,10 @@ async def main():
         logger.warning(f"Certificates not found. Generating self-signed certificate.")
         generate_certificate()
         ssl_ctx.load_cert_chain(certfile=args.certfile, keyfile=args.keyfile)
-    ssl_ctx.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1  # Disable old protocols
+    ssl_ctx.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 
 
     server_instance = AsyncServer(args)
     
-    # Force IPv4 binding (Fixes the Dual Stack issue)
     server = await asyncio.start_server(
         server_instance.handle_client, '0.0.0.0', args.port, ssl=ssl_ctx
     )
