@@ -43,8 +43,7 @@ class AsyncServer:
         self.client_id_counter = itertools.count(1)
 
     def generate_unique_key(self):
-        # FEATURE: We keep the STRONG key generation for users who want it.
-        # 8 characters, mixed case letters + digits.
+        # Strong key generation
         alphabet = string.ascii_letters + string.digits
         for _ in range(100):
             key = "".join(secrets.choice(alphabet) for _ in range(8))
@@ -59,7 +58,15 @@ class AsyncServer:
         sock = writer.get_extra_info('socket')
         if sock:
             try:
+                # 1. TCP_NODELAY: Low Latency (Instant Audio)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                # 2. SO_KEEPALIVE: The Silent Heartbeat (No JSON Pings!)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                # Linux specific: Set keepalive parameters (idle 60s, interval 10s, 3 fails)
+                if sys.platform == 'linux':
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
             except (OSError, AttributeError):
                 pass
 
@@ -69,11 +76,9 @@ class AsyncServer:
 
         try:
             while True:
-                try:
-                    line = await asyncio.wait_for(reader.readline(), timeout=self.args.timeout)
-                except asyncio.TimeoutError:
-                    logger.info(f"Client {client.id} from {addr} timed out.")
-                    break
+                # FIX: Removed the timeout=300. 
+                # Old server never timed out active connections. We rely on TCP Keepalive to detect dead links.
+                line = await reader.readline()
 
                 if not line: 
                     logger.info(f"Client {client.id} from {addr} closed connection.")
@@ -111,18 +116,18 @@ class Client:
         self.protocol_version = 1 
         self.out_queue = asyncio.Queue(maxsize=200) 
         self.writer_task = None
-        self.ping_task = None
+        # Removed ping_task
         self.connection_type = "unknown" 
 
     def start_tasks(self):
         self.writer_task = asyncio.create_task(self.write_loop())
-        self.ping_task = asyncio.create_task(self.keep_alive_loop())
+        # No more ping loop!
 
     async def write_loop(self):
         try:
             while True:
                 data = await self.out_queue.get()
-                if data is None: # Signal to close
+                if data is None: 
                     self.writer.close()
                     break
                 self.writer.write(data)
@@ -139,14 +144,6 @@ class Client:
 
     async def disconnect(self):
         await self.out_queue.put(None)
-
-    async def keep_alive_loop(self):
-        while True:
-            await asyncio.sleep(self.server.args.ping_interval)
-            try:
-                await self.enqueue((json.dumps({"type": "ping"}) + "\n").encode('utf-8'))
-            except:
-                break
 
     async def process_message(self, line):
         try:
@@ -173,22 +170,18 @@ class Client:
             await self.send_error("not_joined")
 
     async def do_generate_key(self):
-        # Generate a STRONG key, send it, and close the connection (standard protocol behavior)
         new_key = self.server.generate_unique_key()
         await self.send_json({"type": "generate_key", "key": new_key})
         await self.disconnect()
 
     async def do_join(self, data):
         new_channel = data.get('channel')
-        # Crucial: Capture connection_type to prevent client crashes
         self.connection_type = data.get('connection_type', 'unknown')
         
         if not new_channel:
             await self.send_error("invalid_parameters")
             return
 
-        # NO LIMITS: We accept every key. If they want to use "1", let them.
-        
         if self.channel_id and self.channel_id in self.server.channels:
              self.server.channels[self.channel_id].discard(self)
              if not self.server.channels[self.channel_id]:
@@ -202,7 +195,6 @@ class Client:
 
         peers = [c for c in self.server.channels[self.channel_id] if c != self]
         
-        # Echo connection_type back to client (Prevent KeyError)
         response = {
             "type": "channel_joined",
             "channel": new_channel,
@@ -218,7 +210,6 @@ class Client:
                 "force_display": self.server.args.motd_force
             })
 
-        # Broadcast connection_type to others (Prevent KeyError on their side)
         await self.broadcast({
             "type": "client_joined", 
             "client": {"id": self.id, "connection_type": self.connection_type}
@@ -255,8 +246,7 @@ class Client:
 
     async def cleanup(self):
         if self.writer_task: self.writer_task.cancel()
-        if self.ping_task: self.ping_task.cancel()
-
+        
         if self.channel_id and self.channel_id in self.server.channels:
             self.server.channels[self.channel_id].discard(self)
             await self.broadcast({"type": "client_left", "user_id": self.id}, include_self=False)
@@ -290,7 +280,7 @@ async def main():
     parser.add_argument("--debug", action="store_true", default=str_to_bool(os.environ.get("NVDA_REMOTE_DEBUG", "False")))
     parser.add_argument("--tracebacks", action="store_true", default=str_to_bool(os.environ.get("NVDA_REMOTE_TRACEBACKS", "False")))
     parser.add_argument("--ping-interval", type=int, default=int(os.environ.get("NVDA_REMOTE_PING_INTERVAL", 60)))
-    parser.add_argument("--timeout", type=int, default=int(os.environ.get("NVDA_REMOTE_TIMEOUT", 300)))
+    parser.add_argument("--timeout", type=int, default=int(os.environ.get("NVDA_REMOTE_TIMEOUT", 300))) # No longer used for disconnecting active clients
     parser.add_argument("--max-msg-size", type=int, default=int(os.environ.get("NVDA_REMOTE_MAX_MSG_SIZE", 1048576)))
     parser.add_argument("--generate-cert", action="store_true")
 
