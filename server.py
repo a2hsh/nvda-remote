@@ -122,7 +122,6 @@ class Client:
         self.out_queue = asyncio.Queue(maxsize=200) 
         self.writer_task = None
         self.ping_task = None
-        # FIX 1: Initialize connection_type to prevent crashes
         self.connection_type = "unknown" 
 
     def start_tasks(self):
@@ -133,6 +132,11 @@ class Client:
         try:
             while True:
                 data = await self.out_queue.get()
+                # FIX: Check for "None" which is our signal to kill the connection cleanly
+                if data is None:
+                    self.writer.close()
+                    break
+                
                 self.writer.write(data)
                 await self.writer.drain()
                 self.out_queue.task_done()
@@ -144,6 +148,10 @@ class Client:
             self.out_queue.put_nowait(data)
         except asyncio.QueueFull:
             self.writer.close()
+    
+    async def disconnect(self):
+        """Cleanly sends all pending messages then closes connection."""
+        await self.out_queue.put(None)
 
     async def keep_alive_loop(self):
         while True:
@@ -180,21 +188,25 @@ class Client:
     async def do_generate_key(self):
         new_key = self.server.generate_unique_key()
         await self.send_json({"type": "generate_key", "key": new_key})
+        # FIX: Disconnect after generating key (Matches original server behavior)
+        await self.disconnect()
 
     async def do_join(self, data):
         new_channel = data.get('channel')
-        # FIX 2: Capture connection_type from the client's join request
         self.connection_type = data.get('connection_type', 'unknown')
         
         if not new_channel:
             await self.send_error("invalid_parameters")
             return
 
+        # Security Check
         if self.server.args.min_key_length > 0:
             is_weak, reason = self.server.is_key_weak(new_channel)
             if is_weak:
-                logger.warning(f"Client {self.id} rejected. Weak Key.")
+                logger.warning(f"Client {self.id} rejected. Weak Key: {new_channel}")
                 await self.send_error(reason)
+                # FIX: Force disconnect so client doesn't hang in zombie state
+                await self.disconnect()
                 return
 
         if self.channel_id and self.channel_id in self.server.channels:
@@ -210,7 +222,6 @@ class Client:
 
         peers = [c for c in self.server.channels[self.channel_id] if c != self]
         
-        # FIX 3: Send connection_type back to the client
         response = {
             "type": "channel_joined",
             "channel": new_channel,
@@ -226,7 +237,6 @@ class Client:
                 "force_display": self.server.args.motd_force
             })
 
-        # FIX 4: Broadcast connection_type to other clients so they know who joined
         await self.broadcast({
             "type": "client_joined", 
             "client": {"id": self.id, "connection_type": self.connection_type}
