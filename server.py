@@ -12,7 +12,6 @@ import itertools
 import socket
 import subprocess
 import base64
-from collections import deque
 
 # Configure logging
 logging.basicConfig(
@@ -76,8 +75,6 @@ class AsyncServer:
 
         try:
             while True:
-                # FIX: Removed the timeout=300. 
-                # Old server never timed out active connections. We rely on TCP Keepalive to detect dead links.
                 line = await reader.readline()
 
                 if not line: 
@@ -103,7 +100,7 @@ class AsyncServer:
             try:
                 writer.close()
                 await writer.wait_closed()
-            except:
+            except Exception:
                 pass
 
 class Client:
@@ -116,25 +113,23 @@ class Client:
         self.protocol_version = 1 
         self.out_queue = asyncio.Queue(maxsize=200) 
         self.writer_task = None
-        # Removed ping_task
-        self.connection_type = "unknown" 
+        self.connection_type = "unknown"
 
     def start_tasks(self):
         self.writer_task = asyncio.create_task(self.write_loop())
-        # No more ping loop!
 
     async def write_loop(self):
         try:
             while True:
                 data = await self.out_queue.get()
-                if data is None: 
+                self.out_queue.task_done()
+                if data is None:
                     self.writer.close()
                     break
                 self.writer.write(data)
                 await self.writer.drain()
-                self.out_queue.task_done()
         except Exception:
-            pass 
+            pass
 
     async def enqueue(self, data):
         try:
@@ -246,10 +241,11 @@ class Client:
 
     async def cleanup(self):
         if self.writer_task: self.writer_task.cancel()
-        
+
         if self.channel_id and self.channel_id in self.server.channels:
-            self.server.channels[self.channel_id].discard(self)
+            # Broadcast departure before removing from channel
             await self.broadcast({"type": "client_left", "user_id": self.id}, include_self=False)
+            self.server.channels[self.channel_id].discard(self)
             if not self.server.channels[self.channel_id]:
                 logger.info(f"Channel '{self.channel_id}' destroyed (empty).")
                 del self.server.channels[self.channel_id]
@@ -279,8 +275,6 @@ async def main():
     parser.add_argument("--motd-force", action="store_true", default=str_to_bool(os.environ.get("NVDA_REMOTE_MOTD_FORCE", "False")))
     parser.add_argument("--debug", action="store_true", default=str_to_bool(os.environ.get("NVDA_REMOTE_DEBUG", "False")))
     parser.add_argument("--tracebacks", action="store_true", default=str_to_bool(os.environ.get("NVDA_REMOTE_TRACEBACKS", "False")))
-    parser.add_argument("--ping-interval", type=int, default=int(os.environ.get("NVDA_REMOTE_PING_INTERVAL", 60)))
-    parser.add_argument("--timeout", type=int, default=int(os.environ.get("NVDA_REMOTE_TIMEOUT", 300))) # No longer used for disconnecting active clients
     parser.add_argument("--max-msg-size", type=int, default=int(os.environ.get("NVDA_REMOTE_MAX_MSG_SIZE", 1048576)))
     parser.add_argument("--generate-cert", action="store_true")
 
@@ -294,9 +288,10 @@ async def main():
     cert_content = os.environ.get("NVDA_REMOTE_CERT_CONTENT")
     if cert_content:
         try:
-            with open("server.pem", "wb") as f:
+            with open(args.certfile, "wb") as f:
                 f.write(base64.b64decode(cert_content))
         except Exception:
+            logger.error("Failed to decode NVDA_REMOTE_CERT_CONTENT")
             sys.exit(1)
 
     ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
