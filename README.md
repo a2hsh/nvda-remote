@@ -59,7 +59,7 @@ Click the **Deploy** button at the bottom of the form. Railway will create the p
 
 #### Phase 2: TCP network routing
 
-This is the one step the template cannot do for you. NVDA Remote uses raw TCP over TLS -- not HTTP -- so you need to enable Railway's TCP proxy.
+This is the one step the template cannot do for you. NVDA Remote uses raw TCP over TLS -- not HTTP -- so you need to enable Railway's TCP proxy. This can only be done through the Railway dashboard (there is no CLI command for it).
 
 **Step 1: Open the service settings**
 
@@ -67,25 +67,21 @@ Once the project dashboard loads, you'll see a block representing your deployed 
 
 **Step 2: Navigate to Networking**
 
-In the panel that opens, select the **Settings** tab and scroll down to the **Networking** section.
+In the panel that opens, select the **Settings** tab and find the **Networking** section.
 
-**Step 3: Enable the TCP proxy**
+**Step 3: Enable TCP Proxy**
 
-Under **Public Networking**, find the **TCP Proxy** option and activate it.
+Click on **TCP Proxy** and enter the internal port your service listens on. This is the port you set in `NVDA_REMOTE_PORT` (or `6837` if you left it at the default).
 
-**Step 4: Map the port**
+**Step 4: Capture your server address**
 
-Railway will ask for the **Service Port** (also called Target Port). Enter exactly `6837`. This tells Railway to forward public traffic directly to port 6837 inside your container.
-
-**Step 5: Capture your server address**
-
-After applying the port, Railway will generate your public connection address. It will look something like:
+Railway will generate a proxy domain and port for you. It will look something like:
 
 ```
-proxy.rlwy.net:12345
+shuttle.proxy.rlwy.net:15140
 ```
 
-Copy this address. The part before the colon is your **host**, and the number after the colon is your **public port**. This is what you'll enter in the NVDA Remote client to connect.
+Copy this address. The part before the colon is your **host**, and the number after the colon is your **public port**. This is what you'll enter in NVDA to connect.
 
 #### Custom domains on Railway
 
@@ -95,17 +91,17 @@ You can point a custom domain at your Railway TCP proxy using a DNS CNAME record
 
 **Setting up the CNAME:**
 
-If Railway gave you `shortline.proxy.rlwy.net:51106`, create a DNS record like this:
+If Railway gave you `shuttle.proxy.rlwy.net:15140`, create a DNS record like this:
 
 | Type | Name | Target |
 |---|---|---|
-| CNAME | `remote` | `shortline.proxy.rlwy.net` |
+| CNAME | `remote` | `shuttle.proxy.rlwy.net` |
 
 Note: drop the port from the target -- DNS breaks if you include it.
 
 Your users would then connect with:
 - **Host:** `remote.yourdomain.com`
-- **Port:** `51106`
+- **Port:** `15140`
 
 This gives you a branded hostname, but users still need to type the port number.
 
