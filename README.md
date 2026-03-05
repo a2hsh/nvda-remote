@@ -1,5 +1,7 @@
 # NVDA Remote Server
 
+**Your own private NVDA Remote relay server. One file. Zero dependencies. Deploy anywhere in seconds.**
+
 A lightweight, single-file relay server for [NVDA Remote Access](https://www.nvaccess.org/post/nvda-2025-1/) -- the built-in remote control feature in NVDA 2025.1 and later. Run your own private server and keep your remote sessions under your control.
 
 > Remote Access was originally the [NVDA Remote](https://nvdaremote.com) add-on, developed by Tyler Spivey and Christopher Toth. Starting with NVDA 2025.1, it ships as a built-in feature -- no add-on required. This server is compatible with both the built-in feature and the legacy add-on.
@@ -15,7 +17,11 @@ The default public NVDA Remote servers work, but they're shared infrastructure. 
 
 This is especially valuable for blind system administrators who need reliable, private remote access to machines on their network.
 
+---
+
 ## Quick start
+
+Pick your path. All roads lead to a running server.
 
 ### Deploy on Railway
 
@@ -105,47 +111,87 @@ This gives you a branded hostname, but users still need to type the port number.
 
 **Want a completely clean address?** If your goal is `remote.yourdomain.com` with no port (just the default `6837`), Railway's TCP proxy can't do that because it doesn't give you a dedicated IP. For a true port-free custom domain, run this on a VPS (DigitalOcean, Linode, Hetzner -- as cheap as $5/month) where you get your own IPv4 address and full control over which port listens.
 
+---
+
 ### Run with Docker
 
 Prebuilt multi-arch images (amd64 + arm64) are published to GitHub Container Registry on every push to `main`.
 
+**Pull the image:**
+
+```bash
+docker pull ghcr.io/a2hsh/nvda-remote:latest
+```
+
 **Using Docker Compose (recommended):**
+
+The easiest way to run the server. Grab the compose file and go:
 
 ```bash
 curl -O https://raw.githubusercontent.com/a2hsh/nvda-remote/main/docker-compose.yml
+# Edit docker-compose.yml to set your environment variables, then:
 docker compose up -d
 ```
 
-Edit `docker-compose.yml` to set your environment variables (certificate, MOTD, etc.) before starting.
+**Using `docker run`:**
 
-**Using Docker directly:**
+Minimal -- auto-generates a self-signed certificate:
 
 ```bash
-docker run -d -p 6837:6837 --name nvda-remote ghcr.io/a2hsh/nvda-remote:latest
+docker run -d \
+  -p 6837:6837 \
+  --name nvda-remote \
+  --restart unless-stopped \
+  ghcr.io/a2hsh/nvda-remote:latest
 ```
 
-The server will auto-generate a self-signed certificate on first run if none is found.
+With all the bells and whistles:
+
+```bash
+docker run -d \
+  -p 6837:6837 \
+  --name nvda-remote \
+  --restart unless-stopped \
+  -e NVDA_REMOTE_PORT=6837 \
+  -e NVDA_REMOTE_MOTD="Welcome to my NVDA Remote server." \
+  -e NVDA_REMOTE_CERT_CONTENT="$(base64 -w0 server.pem)" \
+  ghcr.io/a2hsh/nvda-remote:latest
+```
+
+Pin to a specific version if you prefer stability over living on the edge:
+
+```bash
+docker run -d \
+  -p 6837:6837 \
+  --name nvda-remote \
+  --restart unless-stopped \
+  ghcr.io/a2hsh/nvda-remote:1.0.0
+```
 
 **Building locally:**
 
 ```bash
 docker build -t nvda-remote .
-docker run -d -p 6837:6837 --name nvda-remote nvda-remote
+docker run -d -p 6837:6837 --name nvda-remote --restart unless-stopped nvda-remote
 ```
+
+---
 
 ### Run directly
 
-Requires Python 3.8+ and OpenSSL.
+No Docker? No problem. Requires Python 3.8+ and OpenSSL.
 
 ```bash
 python server.py
 ```
 
-That's it. No dependencies beyond the Python standard library.
+That's it. One file, zero `pip install`, pure Python standard library. The server will auto-generate a self-signed certificate on first run if none exists.
+
+---
 
 ## Configuration
 
-All options can be set via command-line arguments or environment variables.
+All options can be set via command-line arguments or environment variables. Environment variables make it easy to configure in Docker, Railway, or any platform that supports them.
 
 | Argument | Environment Variable | Default | Description |
 |---|---|---|---|
@@ -159,9 +205,11 @@ All options can be set via command-line arguments or environment variables.
 | `--tracebacks` | `NVDA_REMOTE_TRACEBACKS` | `false` | Log full tracebacks on errors |
 | `--generate-cert` | -- | -- | Generate a self-signed certificate and exit |
 
+---
+
 ### TLS certificates
 
-The server requires TLS. On first run, it will auto-generate a self-signed certificate (`server.pem`) using OpenSSL. For production, you have several options:
+The server requires TLS -- every connection is encrypted. On first run, it will auto-generate a self-signed certificate (`server.pem`) using OpenSSL. For production, you have several options:
 
 **Provide your own certificate file:**
 ```bash
@@ -216,10 +264,12 @@ Or in Docker:
 ```bash
 docker run -d -p 6837:6837 \
   -e NVDA_REMOTE_CERT_CONTENT="$(base64 -w0 server.pem)" \
-  nvda-remote
+  ghcr.io/a2hsh/nvda-remote:latest
 ```
 
 When the server starts, it decodes `NVDA_REMOTE_CERT_CONTENT` and writes it to the certificate path (default `server.pem`). This happens before the TLS listener starts, so the server is ready immediately.
+
+---
 
 ## Connecting with NVDA
 
@@ -227,13 +277,18 @@ As of NVDA 2025.1, Remote Access is built in. No add-on needed.
 
 1. In NVDA, go to **Tools > Remote > Connect**
 2. Select **Control another machine** or **Allow this machine to be controlled**
-3. Enter your server address -- for example `proxy.rlwy.net:12345` (Railway TCP proxy), `remote.yourdomain.com:51106` (custom domain on Railway), or `yourserver.example.com:6837` (self-hosted)
+3. Enter your server address -- for example:
+   - `proxy.rlwy.net:12345` -- Railway TCP proxy
+   - `remote.yourdomain.com:51106` -- custom domain on Railway
+   - `yourserver.example.com:6837` -- self-hosted (VPS, home server, etc.)
 4. Enter or generate a key
 5. Click **Connect**
 
 Both users must connect to the same server with the same key.
 
 > Still on an older version of NVDA? The legacy [NVDA Remote add-on](https://nvdaremote.com) works with this server too.
+
+---
 
 ## Architecture
 
@@ -245,6 +300,22 @@ This is a single-file asyncio server (~300 lines of Python) that acts as a messa
 - Uses **TCP keepalive** for dead connection detection (no application-level ping overhead)
 - Per-client write queues with backpressure (queue full = connection closed)
 - Channels are created on first join and destroyed when the last client leaves
+
+No database. No framework. No dependencies. Just Python and a socket.
+
+---
+
+## Releasing new versions
+
+The project uses a `VERSION` file as the single source of truth. To release:
+
+1. Update the version in `VERSION`
+2. Commit the change
+3. Run `./release.sh`
+
+The script will tag, push, and trigger the CI to build Docker images for the new version. Images are tagged as `latest`, `X.Y.Z`, `X.Y`, and `X`.
+
+---
 
 ## License
 
