@@ -1,0 +1,13 @@
+services:
+    nvda-remote:
+        image: ghcr.io/a2hsh/nvda-remote:latest
+        pull_policy: always
+        container_name: nvda-remote
+        ports:
+            - "6837:6837"
+        environment:
+            - NVDA_REMOTE_PORT=6837
+            # - NVDA_REMOTE_CERT_CONTENT=   # Base64-encoded PEM (leave unset to auto-generate)
+            # - NVDA_REMOTE_MOTD=Welcome to my NVDA Remote server
+            # - NVDA_REMOTE_DEBUG=false
+        restart: unless-stopped
