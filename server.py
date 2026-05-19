@@ -123,7 +123,7 @@ class Client:
     async def ping_loop(self):
         try:
             while True:
-                await asyncio.sleep(30)
+                await asyncio.sleep(15)
                 await self.send_json({"type": "ping"})
         except (asyncio.CancelledError, Exception):
             pass
@@ -255,7 +255,11 @@ class Client:
 
         if self.channel_id and self.channel_id in self.server.channels:
             # Broadcast departure before removing from channel
-            await self.broadcast({"type": "client_left", "user_id": self.id}, include_self=False)
+            await self.broadcast({
+                "type": "client_left",
+                "user_id": self.id,
+                "client": {"id": self.id, "connection_type": self.connection_type}
+            }, include_self=False)
             self.server.channels[self.channel_id].discard(self)
             if not self.server.channels[self.channel_id]:
                 logger.info(f"Channel '{self.channel_id}' destroyed (empty).")
