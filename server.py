@@ -113,10 +113,20 @@ class Client:
         self.protocol_version = 1 
         self.out_queue = asyncio.Queue(maxsize=200) 
         self.writer_task = None
+        self.ping_task = None
         self.connection_type = "unknown"
 
     def start_tasks(self):
         self.writer_task = asyncio.create_task(self.write_loop())
+        self.ping_task = asyncio.create_task(self.ping_loop())
+
+    async def ping_loop(self):
+        try:
+            while True:
+                await asyncio.sleep(30)
+                await self.send_json({"type": "ping"})
+        except (asyncio.CancelledError, Exception):
+            pass
 
     async def write_loop(self):
         try:
@@ -240,6 +250,7 @@ class Client:
         await self.send_json({"type": "error", "error": error_msg})
 
     async def cleanup(self):
+        if self.ping_task: self.ping_task.cancel()
         if self.writer_task: self.writer_task.cancel()
 
         if self.channel_id and self.channel_id in self.server.channels:
